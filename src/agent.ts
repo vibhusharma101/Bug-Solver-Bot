@@ -73,16 +73,89 @@ export async function solveIssue(
     const branchName = `fix/sentry-${issue.shortId.toLowerCase()}`;
     await createBranch(branchName);
 
-    // Step 5: Get the current content from THE NEW/EXISTING BRANCH
-    const existingFile = await getFileContent(fix.filePath, branchName);
-    if (!existingFile) {
-        throw new Error(`File not found in repo: ${fix.filePath}`);
+    // Step 5: Get the current content from THE BASE BRANCH (to ensure we have the broken code)
+    const baseFile = await getFileContent(fix.filePath, config.github.baseBranch);
+    if (!baseFile) {
+      throw new Error(`File not found in repo: ${fix.filePath}`);
     }
 
-    // Step 6: Apply the surgical fix
-    const patchedCode = existingFile.content.replace(fix.search, fix.replace);
-    if (patchedCode === existingFile.content) {
-        throw new Error(`Surgical fix failed: Search block not found in ${fix.filePath}. Make sure the search block exactly matches the file content.`);
+    // Also get the SHA from the branch we're committing to (to avoid conflicts)
+    const branchFile = await getFileContent(fix.filePath, branchName);
+    const targetSha = branchFile?.sha || baseFile.sha;
+
+    // Step 6: Apply the surgical fix with Smart Match (resilient to indent/spacing)
+    let patchedCode = baseFile.content.replace(fix.search, fix.replace);
+    
+    if (patchedCode === baseFile.content) {
+      logger.info(`[${issue.shortId}] Exact match failed, trying Smart Line Match...`);
+      logger.info(`[${issue.shortId}] Looking for search block:\n${fix.search}`);
+      
+      const fileLines = baseFile.content.split(/\r?\n/);
+      const searchLines = fix.search.split(/\r?\n/).map(l => l.trim());
+      
+      let foundIndex = -1;
+      let bestMatch = { index: -1, score: 0 };
+
+      for (let i = 0; i <= fileLines.length - searchLines.length; i++) {
+        let matchCount = 0;
+        for (let j = 0; j < searchLines.length; j++) {
+            // "Normal Match": Ignore all non-alphanumeric characters for extreme resilience
+            const lineA = fileLines[i + j].replace(/[^a-zA-Z0-9]/g, '');
+            const lineB = searchLines[j].replace(/[^a-zA-Z0-9]/g, '');
+            
+            if (lineA === lineB && lineB.length > 0) {
+                matchCount++;
+            } else if (lineA !== lineB) {
+                break;
+            }
+        }
+        
+        if (matchCount === searchLines.length) {
+            foundIndex = i;
+            break;
+        }
+        
+        if (matchCount > bestMatch.score) {
+            bestMatch = { index: i, score: matchCount };
+        }
+      }
+
+      if (foundIndex !== -1) {
+          fileLines.splice(foundIndex, searchLines.length, fix.replace);
+          patchedCode = fileLines.join('\n');
+          logger.info(`[${issue.shortId}] Normal Match found at line ${foundIndex + 1}!`);
+      } else {
+          // Tier 3: Best Effort Match (Single Line)
+          // If the block didn't match perfectly, try matching just the first line that has alphanumeric content.
+          logger.info(`[${issue.shortId}] Block match failed. Trying single-line Best Effort match...`);
+          
+          const primarySearchLine = searchLines.find(l => l.replace(/[^a-zA-Z0-9]/g, '').length > 10) || searchLines[0];
+          const normPrimary = primarySearchLine.replace(/[^a-zA-Z0-9]/g, '');
+          logger.info(`[${issue.shortId}] Best Effort Target: ${normPrimary}`);
+          
+          const singleLineIndex = fileLines.findIndex((fLine, fIdx) => {
+            const normFLine = fLine.replace(/[^a-zA-Z0-9]/g, '');
+            if (fIdx > 90 && fIdx < 110) {
+                logger.info(`[${issue.shortId}] Line ${fIdx + 1} norm: ${normFLine}`);
+            }
+            return normFLine.includes(normPrimary) && normPrimary.length > 5;
+          });
+
+          if (singleLineIndex !== -1) {
+              logger.info(`[${issue.shortId}] Best Effort: Found primary line at line ${singleLineIndex + 1}!`);
+              // We replace the single line. This is safer than failing entirely.
+              fileLines[singleLineIndex] = fix.replace;
+              patchedCode = fileLines.join('\n');
+          } else {
+              if (bestMatch.index !== -1) {
+                  const idx = bestMatch.index + bestMatch.score;
+                  logger.warn(`[${issue.shortId}] Match failed at line ${idx + 1}.`);
+                  logger.warn(`  Expected (norm): ${searchLines[bestMatch.score].replace(/[^a-zA-Z0-9]/g, '')}`);
+                  logger.warn(`  Found    (norm): ${fileLines[idx].replace(/[^a-zA-Z0-9]/g, '')}`);
+              }
+              throw new Error(`Surgical fix failed: Could not find code block in ${fix.filePath}.`);
+          }
+      }
     }
 
     await commitFileFix(
@@ -90,7 +163,7 @@ export async function solveIssue(
       fix.filePath,
       patchedCode,
       fix.commitMessage,
-      existingFile.sha
+      targetSha
     );
 
     // Step 6: Open PR

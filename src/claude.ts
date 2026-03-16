@@ -26,7 +26,7 @@ const SYSTEM_PROMPT = `Senior Engineer. Fix bugs surgicaly.
 Output ONLY JSON:
 {
   "filePath": "string",
-  "search": "exact code to find",
+  "search": "Concise, UNIQUE block. COPY VERBATIM from source.",
   "replace": "new code",
   "explanation": "summary",
   "commitMessage": "fix: description"
@@ -194,7 +194,7 @@ function parseClaudeResponse(
   let cleaned = rawText.trim();
   const firstBrace = cleaned.indexOf('{');
   const lastBrace = cleaned.lastIndexOf('}');
-  
+
   if (firstBrace !== -1) {
     if (lastBrace > firstBrace) {
       cleaned = cleaned.substring(firstBrace, lastBrace + 1);
@@ -205,7 +205,7 @@ function parseClaudeResponse(
 
   // Handle truncation: if it doesn't end with }, try to close it
   if (!cleaned.endsWith('}')) {
-      cleaned += '"}'; // Rough attempt to close a string and object
+    cleaned += '"}'; // Rough attempt to close a string and object
   }
 
   try {
