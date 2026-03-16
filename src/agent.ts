@@ -69,21 +69,28 @@ export async function solveIssue(
       return { issueId: issue.id, shortId: issue.shortId, success: false, reason };
     }
 
-    logger.info(`[${issue.shortId}] Fix generated for: ${fix.filePath}`);
-
-    // Step 4: Get the current SHA of the file (needed for the GitHub API commit)
-    const existingFile = await getFileContent(fix.filePath);
-    const fileSha = existingFile?.sha;
-
-    // Step 5: Create branch and commit
+    // Step 4: Create branch first
     const branchName = `fix/sentry-${issue.shortId.toLowerCase()}`;
     await createBranch(branchName);
+
+    // Step 5: Get the current content from THE NEW/EXISTING BRANCH
+    const existingFile = await getFileContent(fix.filePath, branchName);
+    if (!existingFile) {
+        throw new Error(`File not found in repo: ${fix.filePath}`);
+    }
+
+    // Step 6: Apply the surgical fix
+    const patchedCode = existingFile.content.replace(fix.search, fix.replace);
+    if (patchedCode === existingFile.content) {
+        throw new Error(`Surgical fix failed: Search block not found in ${fix.filePath}. Make sure the search block exactly matches the file content.`);
+    }
+
     await commitFileFix(
       branchName,
       fix.filePath,
-      fix.fixedCode,
+      patchedCode,
       fix.commitMessage,
-      fileSha
+      existingFile.sha
     );
 
     // Step 6: Open PR

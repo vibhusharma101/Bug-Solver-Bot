@@ -19,7 +19,7 @@ function optionalEnv(name: string, defaultValue = ""): string {
 export const config = {
   anthropic: {
     apiKey: requireEnv("ANTHROPIC_API_KEY"),
-    model: "claude-3-5-sonnet-latest",
+    model: "claude-3-haiku-20240307",
   },
   github: {
     token: requireEnv("GITHUB_TOKEN"),

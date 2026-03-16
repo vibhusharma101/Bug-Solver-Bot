@@ -1,4 +1,4 @@
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { Client } from "@modelcontextprotocol/sdk/client";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import Anthropic from "@anthropic-ai/sdk";
 import { config } from "./config.js";
@@ -34,7 +34,8 @@ export async function createSentryMcpBridge(): Promise<McpBridge> {
     args: ["-y", "@sentry/mcp-server@latest"],
     env: {
       ...process.env,
-      SENTRY_AUTH_TOKEN: config.sentry.authToken,
+      // The Sentry MCP server requires SENTRY_ACCESS_TOKEN specifically
+      SENTRY_ACCESS_TOKEN: config.sentry.authToken,
     } as Record<string, string>,
   });
 
@@ -50,7 +51,7 @@ export async function createSentryMcpBridge(): Promise<McpBridge> {
   const { tools: mcpTools } = await client.listTools();
 
   // Convert MCP tool schema → Anthropic tool format
-  const anthropicTools: Anthropic.Tool[] = mcpTools.map((tool) => ({
+  const anthropicTools: Anthropic.Tool[] = mcpTools.map((tool: { name: string; description?: string; inputSchema: object }) => ({
     name: tool.name,
     description: tool.description ?? `Sentry MCP tool: ${tool.name}`,
     input_schema: tool.inputSchema as Anthropic.Tool["input_schema"],

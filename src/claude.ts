@@ -9,7 +9,8 @@ import { McpBridge } from "./mcp.js";
 
 export interface ClaudeFix {
   filePath: string;
-  fixedCode: string;
+  search: string;
+  replace: string;
   explanation: string;
   commitMessage: string;
 }
@@ -20,33 +21,21 @@ const anthropic = new Anthropic({ apiKey: config.anthropic.apiKey });
 
 // ---- System Prompt --------------------------------------------------------
 
-const SYSTEM_PROMPT = `You are an expert Senior Software Engineer specializing in debugging and fixing production bugs.
+const SYSTEM_PROMPT = `Senior Engineer. Fix bugs surgicaly.
 
-You have access to Sentry tools to deeply investigate issues (stack traces, events, breadcrumbs, user context) and a GitHub file fetcher to read source code.
-
-## Your workflow for each bug:
-1. Call the appropriate Sentry tool to get full issue details (stack trace, events, affected users)
-2. Identify the exact file and line causing the error from the stack trace
-3. Call fetch_github_file to read that source file
-4. If needed, fetch additional related files for context
-5. Identify the ROOT CAUSE — not just the symptom
-6. Generate a minimal, targeted fix
-
-## Output format:
-When you have fully investigated and are ready to provide the fix, respond with ONLY a JSON object — no markdown, no explanation outside the JSON:
-
+Output ONLY JSON:
 {
-  "filePath": "relative/path/to/the/file",
-  "fixedCode": "the COMPLETE fixed file content with the fix applied",
-  "explanation": "2-3 sentences: what caused the bug, what the fix does, why it's correct",
-  "commitMessage": "fix: short description under 72 chars"
+  "filePath": "string",
+  "search": "exact code to find",
+  "replace": "new code",
+  "explanation": "summary",
+  "commitMessage": "fix: description"
 }
 
-## Rules:
-- Fix ONLY the bug. Preserve all other code exactly (style, formatting, variable names)
-- Never rewrite or refactor code that isn't broken
-- Fixes must be minimal and surgical
-- If you genuinely cannot determine a safe fix, respond with: {"error": "reason why"}`;
+Investigation:
+1. get_issue_details
+2. fetch_github_file
+3. RETURN JSON ONLY. NO TEXT.`;
 
 // ---- Custom GitHub tool definition ----------------------------------------
 
@@ -88,13 +77,17 @@ export async function analyzeBugAndFix(
     {
       role: "user",
       content:
-        `Investigate and fix this Sentry issue:\n\n` +
-        `**Sentry Issue ID:** ${issue.shortId}\n` +
-        `**Title:** ${issue.title}\n` +
-        `**Culprit:** ${issue.culprit}\n` +
-        `**Event Count:** ${issue.count} events\n\n` +
-        `Use the Sentry tools to get the full stack trace and event details, ` +
-        `then fetch the relevant source file from GitHub and provide the fix.`,
+        `**Sentry Context:**\n` +
+        `- Organization Slug: ${config.sentry.org}\n` +
+        `- Project Slug: ${config.sentry.project}\n\n` +
+        `**Issue Info:**\n` +
+        `- Sentry Issue ID: ${issue.shortId}\n` +
+        `- Title: ${issue.title}\n` +
+        `- Culprit: ${issue.culprit}\n\n` +
+        `**REQUIRED STEPS:**\n` +
+        `1. Call get_issue_details to see the stack trace.\n` +
+        `2. Call fetch_github_file to read the causal source code.\n` +
+        `3. Apply the fix and return the JSON object.`,
     },
   ];
 
@@ -197,35 +190,43 @@ function parseClaudeResponse(
   rawText: string,
   issue: SentryIssue
 ): ClaudeFix | null {
-  // Strip accidental markdown code fences
-  const cleaned = rawText
-    .replace(/^```(?:json)?\s*/m, "")
-    .replace(/\s*```\s*$/m, "")
-    .trim();
+  // Try to find the JSON block.
+  let cleaned = rawText.trim();
+  const firstBrace = cleaned.indexOf('{');
+  const lastBrace = cleaned.lastIndexOf('}');
+  
+  if (firstBrace !== -1) {
+    if (lastBrace > firstBrace) {
+      cleaned = cleaned.substring(firstBrace, lastBrace + 1);
+    } else {
+      cleaned = cleaned.substring(firstBrace);
+    }
+  }
+
+  // Handle truncation: if it doesn't end with }, try to close it
+  if (!cleaned.endsWith('}')) {
+      cleaned += '"}'; // Rough attempt to close a string and object
+  }
 
   try {
     const parsed = JSON.parse(cleaned) as Record<string, unknown>;
 
-    // Claude signalled it can't fix this
     if (parsed.error) {
-      logger.warn(
-        `[${issue.shortId}] Claude declined to fix: ${parsed.error}`
-      );
+      logger.warn(`[${issue.shortId}] Claude declined: ${parsed.error}`);
       return null;
     }
 
-    if (!parsed.filePath || !parsed.fixedCode || !parsed.explanation) {
-      logger.warn(
-        `[${issue.shortId}] Claude response missing required fields`,
-        { keys: Object.keys(parsed) }
-      );
+    const { filePath, search, replace, explanation } = parsed as any;
+    if (!filePath || !search || replace === undefined || !explanation) {
+      logger.warn(`[${issue.shortId}] Claude response missing fields`, { keys: Object.keys(parsed) });
       return null;
     }
 
     return {
-      filePath: parsed.filePath as string,
-      fixedCode: parsed.fixedCode as string,
-      explanation: parsed.explanation as string,
+      filePath: filePath as string,
+      search: search as string,
+      replace: replace as string,
+      explanation: explanation as string,
       commitMessage:
         typeof parsed.commitMessage === "string"
           ? parsed.commitMessage
